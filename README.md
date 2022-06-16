@@ -9,10 +9,12 @@ How about we combine the candidate models that are useful? And this naturally le
 ---
 
 Bayesian Model Averaging or BMA is an ensemble machine learning model that combines multiple competing models together to make a more robust prediction. 
+
 ![BMA](BMA.jpg)
 ## Optimal Band Ratio Analysis (OBRA)
 ---
 Optimal Band Ratio Analysis, or OBRA in short is a relatively popular model for TSS prediction because it is easy to implement, and band-ratios are quite robust to various spectral shapes associated to different optically complex water body medium.
+
 ![OBRA](OBRA.jpg)
 
 ## Conceptual framework of HBMA-OMBRA
