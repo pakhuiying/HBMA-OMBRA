@@ -1,0 +1,1066 @@
+---
+title: "R Notebook"
+output: html_notebook
+---
+
+```{r}
+library(ggplot2)
+library(dplyr)
+library(reshape2)
+library(stats)
+library(stringr)
+library(tidyr)
+library(tidyverse)
+library(stringi)
+library(stringr)
+library(BMS)
+# library(FactoMineR)
+# library(ggbiplot)
+# library(factoextra)
+library(RColorBrewer)
+library(ggpubr)
+```
+
+# Candidate BBRs
+```{r}
+clustered_candidate_BBR
+```
+
+
+# Data
+
+## Full train data
+```{r}
+head(TSS_sensor_angle_train)
+nrow(TSS_sensor_angle_train)
+```
+
+## Full test data
+```{r}
+head(TSS_sensor_angle_test)
+nrow(TSS_sensor_angle_test)
+```
+
+
+## BBR_train, BBR_valid, BBR_test
+```{r}
+create_clustered_data = function(df,clustered_candidate_BBR){
+  data_name <- deparse(substitute(df))
+  
+  meta_columns <- c("Concentration","Sensor_Angle","Azimuth","Altitude")
+  
+  df_cluster = function(df_type){
+    clustered_data <- lapply(clustered_candidate_BBR,function(cluster_i_candidate_BBRs){
+      cluster_i_candidate_BBRs <- cluster_i_candidate_BBRs%>%
+        mutate(column_name = sprintf("X%0.2f_%0.2f", b0,b1))
+      
+      cluster_BBRs <- cluster_i_candidate_BBRs$column_name
+    
+      col_names<-c(meta_columns,cluster_BBRs)
+      # print(length(col_names))
+      col_names <- names(df_type)[(names(df_type) %in% col_names)] #using train data
+      df.subset <- df_type[,col_names]
+      df.subset
+    })    
+  }
+  
+  if (grepl("test", data_name,fixed=T) == T){
+    set.seed(1)
+    df<-df%>%
+      dplyr::mutate(id=row_number())
+    
+    valid<-df%>%
+      sample_frac(0.5,replace=F)
+    
+    test<- anti_join(df,valid,by="id")
+    
+    output<-list(valid = df_cluster(valid),test = df_cluster(test))
+  }
+  
+  else {
+    output<-df_cluster(df)
+  }
+  
+  
+  output
+  
+}
+BBR_train = create_clustered_data(TSS_sensor_angle_train,clustered_candidate_BBR)
+BBR_valid = create_clustered_data(TSS_sensor_angle_test,clustered_candidate_BBR)$valid
+BBR_test = create_clustered_data(TSS_sensor_angle_test,clustered_candidate_BBR)$test
+```
+
+```{r}
+BBR_train
+BBR_valid
+BBR_test
+```
+
+
+## Cluster train,valid,train data (clustered_candidate_BBR_df)
+
+```{r}
+clustered_candidate_BBR_df
+clustered_candidate_BBR_valid
+clustered_candidate_BBR_test
+```
+
+# save csvs
+```{r}
+# for (i in c(1:length(clustered_candidate_BBR_valid))){
+#   # print(clustered_candidate_BBR_df[[i]])
+#   write.csv(clustered_candidate_BBR_valid[[i]],paste0("/Users/huiying/Documents/NTU/Drone/Machine_Learning/clustered_candidate_BBR_valid_",i,".csv"))
+# }
+```
+
+
+# Base BMA models
+
+## Base models without meta data
+```{r}
+TSS_bms_models
+```
+
+### function to replot cummulative PMPs
+```{r}
+image_bma_test = function(x,cex.main=1.0,cex.axis=1.2,cluster_number=0 ){
+  #where x is the bms model
+  
+  ests = estimates.bma(x, exact = TRUE, order.by.pip = T, 
+        include.constant = FALSE)
+  ests = ests[nrow(ests):1, ]
+  pips = ests[, "PIP"]
+  idx = ests[, "Idx"]
+  pmp.res = pmp.bma(x, oldstyle = TRUE)
+  pmps = pmp.res[, 1]
+  normali_factor = sum(pmp.res[, 2])
+  pipbounds = 0:length(pips)
+  names(pipbounds) = c("", names(pips))
+  pmp.res = pmp.bma(x, oldstyle = TRUE)
+  pmps = pmp.res[, 1]
+  pmpbounds = (c(0, cumsum(pmps)))
+  y_labels <- names(pipbounds[-1])
+  y_labels <-str_replace_all(y_labels,c("X"="","_"="/"))
+  number_of_models<-length(pmps)
+  # print(number_of_models)
+  #----plotting------
+  image(x,col=c("tomato","blue"),do.axis=F,main="")
+  # axis(2,at = seq(0.5,5.5,by=1),labels=paste0("somelongword",LETTERS[1:6]),lwd=0,las = 1)
+  axis(1, at = pmpbounds, labels = round(normali_factor *
+            pmpbounds, 2),cex.axis=cex.axis) #x axis labels
+  axis(2, at = pipbounds[-1] - diff(pipbounds)/2, labels = y_labels,
+            tick = FALSE, las = 1,pos=0.01,cex.axis=cex.axis) #y axis labels
+  title(main = paste("Model Inclusion Based on Best ", number_of_models, " Models","\n (Cluster ",cluster_number,")"),cex.main=cex.main)
+  
+}
+image_bma_test(TSS_bms_models$uniform$UIP$`2`)
+```
+
+
+
+```{r}
+plot_cummulative_PMPs = function(TSS_bms_models){
+  flattened_bms_models<-flatten_nested_list(TSS_bms_models)
+  n_models <- seq_along(flattened_bms_models)
+  max_element <- 6
+  split_bms_models<-split(flattened_bms_models,ceiling(n_models/max_element))
+  n_groups <- length(flattened_bms_models)/max_element
+  
+  for (i_group in c(1:n_groups)){
+    group_names<-gsub('.{2}$', '', names(split_bms_models[[i_group]])[1])
+    
+    # mypath <- paste0("/Users/huiying/Documents/NTU/Drone/Machine_Learning/results_images/cummulative_PMPs_",group_names,".png")
+    mypath <- paste0("/Users/huiying/Library/CloudStorage/OneDrive-NanyangTechnologicalUniversity/Research_Papers/MoCa OBRA/Machine_Learning/results_images/cummulative_PMPs_",group_names,".png")
+    
+    png(file=mypath,units="in",width=8, height=13, res=300) #res=300 to increase resolution
+    
+    par(mfrow=c(ceiling(max_element/2),2))
+    for (i in c(1:max_element)){
+      image_bma_test(split_bms_models[[i_group]][[i]],cex.axis = 1.2,cex.main=1.4,cluster_number=i-1)
+    }
+    
+    dev.off()
+  }
+  
+}
+plot_cummulative_PMPs(TSS_bms_models)
+```
+
+#coefficients of models with different model configuration
+```{r}
+#coefficients of models with different model configuration
+
+coefficient_model_list<-  lapply(TSS_bms_models,function(m_prior){
+    model_config_df<-lapply(m_prior,function(g_prior){
+      cluster_coef<-lapply(g_prior,function(cluster){
+        # print(ncol(topmodels.bma(cluster)))
+        # image(cluster)
+        as.data.frame(coef(cluster,std.coefs = T, order.by.pip = T, include.constant = T))%>%
+          tibble::rownames_to_column("Band")
+      })
+      bind_rows(cluster_coef,.id="Cluster")%>%
+        mutate(Band = str_replace_all(Band,c("X"="","_"="/")))%>%
+        mutate_if(is.numeric,function(x)round(x,3))
+      #   filter(PIP>0.9)
+      # /Users/huiying/Documents/NTU/Drone/Machine_Learning/results_images
+
+    })
+    
+    model_config_df
+    
+  })
+
+# coefficient_model_list<-flatten(coefficient_model_list)
+# 
+# csv_names_df<-paste(rep(names(TSS_bms_models),each=3),rep(names(TSS_bms_models$uniform),2),sep=".")
+# 
+# mapply(function(df,name_csv){
+#     write.csv(df,paste0('/Users/huiying/Documents/NTU/Drone/Machine_Learning/results_images/',name_csv,"_model_coef.csv"))
+#   },coefficient_model_list,csv_names_df)
+```
+
+
+
+
+```{r}
+plot_PIP_cluster = function(TSS_bms_models){
+  df<-bind_rows(
+    lapply(TSS_bms_models,function(m_prior){
+      g_prior_list<-lapply(m_prior,function(g_prior){
+        cluster_coef<-lapply(g_prior,function(cluster){
+          # print(ncol(topmodels.bma(cluster)))
+          # image(cluster)
+          as.data.frame(coef(cluster,std.coefs = T, order.by.pip = F, include.constant = F))%>%
+            tibble::rownames_to_column("Bands")
+        })
+        bind_rows(cluster_coef,.id="Cluster")
+        
+      })
+      bind_rows(g_prior_list,.id="g_priors")
+    })
+  ,.id="model_priors")%>%
+    mutate("Model Configurations" = paste(model_priors,g_priors,sep="."))%>%
+    mutate(Cluster_name=paste0("Cluster ",Cluster))%>%
+    mutate(new_Bands = str_replace_all(Bands,c("X"="","_"="/")))
+  
+  PIP_cluster<-df%>%
+    ggplot(aes(x=new_Bands,y=PIP))+
+    geom_point(aes(shape=`Model Configurations`,color=`Model Configurations`))+
+    labs(x="Candidate Best Band Ratios")+
+    scale_y_log10()+
+    facet_wrap(~Cluster_name,scales="free_x",ncol = 1)+
+    theme_classic()+
+    theme(strip.background=element_rect(fill="grey",colour = "white"), 
+        strip.text = element_text(face="bold"),
+        strip.placement="outside",
+        axis.text.x = element_text(angle = 60, hjust = 1,size=7), 
+        #text=element_text(size=12),
+       legend.position="bottom"
+        )
+  
+  ggsave(paste0("/Users/huiying/Documents/NTU/Drone/Machine_Learning/results_images/PIP_cluster.png"),PIP_cluster,units="in",width=6, height=10)
+  #--------average PIPs across diff model configurations and filter bands with PIP > 0.9
+  # df%>%
+  #   group_by(Cluster,Bands)%>%
+  #   summarise_at(vars(PIP),mean)%>%
+  #   filter(PIP>0.9)%>%
+  #   arrange(Cluster,Bands)
+  
+  PIP_cluster
+  
+}
+
+plot_PIP_cluster(TSS_bms_models)
+```
+
+
+
+
+
+
+```{r}
+#get average regressors
+avg_regressors <- do.call(rbind,
+  lapply(TSS_bms_models,function(m_prior){
+      model_config_df<-lapply(m_prior,function(g_prior){
+        cluster_coef<-lapply(g_prior,function(cluster){
+          # print(ncol(topmodels.bma(cluster)))
+          # image(cluster)
+          as.data.frame(summary(cluster))
+        })
+        
+        summary_df <-do.call(cbind,cluster_coef)
+        names(summary_df)<-paste0("Cluster ",names(g_prior))
+        avg_regressors_clusters <- t(summary_df[1,])
+        avg_regressors_clusters
+      })
+      
+      as.data.frame(do.call(rbind,model_config_df))
+    
+  }))
+avg_regressors$`Mean no. regressors`
+
+#Get PMP of models and the number of top models
+cluster_models_PMP <- bind_rows(
+  lapply(TSS_bms_models,function(m_prior){
+    g_prior_list<-lapply(m_prior,function(g_prior){
+      model_info<-lapply(g_prior,function(cluster){
+        number_of_top_models <- ncol(topmodels.bma(cluster))
+        # image(cluster)
+        tm <- topmodels.bma(cluster)
+        nrows<-nrow(tm)
+        PMP_sum <- apply(tm[c(nrows-1,nrows),],1,sum) #sum of all rows, outputs two columns with PMP (exact), PMP (MCMC)
+        df<-as.data.frame(t(PMP_sum))
+        df$number_of_top_models <- number_of_top_models
+        df
+      })
+      bind_rows(model_info,.id="Cluster")
+      # model_info
+    })
+    bind_rows(g_prior_list,.id="g_prior")
+  })
+,.id="model_prior")
+
+
+cluster_models_PMP$Avg.Regressors <- as.numeric(as.character(avg_regressors$`Mean no. regressors`))
+
+cluster_models_PMP$n_Covariates <- c(8,11,24,6,11,20)
+
+cluster_models_PMP%>%
+  group_by(Cluster)%>%
+  summarise_at(vars(Avg.Regressors),mean)
+# write.csv(cluster_models_PMP,'/Users/huiying/Documents/NTU/Drone/Machine_Learning/results_images/cluster_models_PMP.csv')
+```
+
+
+
+## Base models with meta data
+```{r}
+m_prior_list <- c("uniform","random")
+g_list <- c("UIP","BRIC","EBL")
+
+TSS_full_bms_models <- sapply(m_prior_list,function(m_prior_param){
+  sapply(g_list,function(g_param){
+    
+    lapply(BBR_train,function(x){ #cluster df
+      bms(x, burn = 50000, iter = 1e+06, g = g_param, mprior = m_prior_param, nmodel = 2000, mcmc = "rev.jump",user.int=T)
+    })
+    
+  },simplify = F)
+},simplify = F)
+
+TSS_full_bms_models
+```
+
+
+
+
+# Hierarch models (bma weighted averaged)
+
+## HBMA_predict
+```{r}
+HBMA_predict = function(base_model_list,cluster_train,cluster_test,include.hierarch = T,get.best.bma = T,convert.to.lm = F,show.model.performance = T,plot.graph=F){
+  #base_model_list is TSS_bms_models, which is a nested list of model configs and cluster models.
+  #base_model_list is already a trained model, trained on train data set i.e. clustered_candidate_BBR_df
+  #base_model_list > model_prior > g_prior > cluster_models
+  #cluster_data can be train, valid or test data, ensure that the variable had the string valid/test
+  #if get.best.bma  == T, then it would only retrieve the model with the highest PMP, otherwise it would use the BMA weighted averaged model for each cluster
+  # if convert.to.lm == T, then the bma model will be converted to a standard OLS model
+  # if include.hierarch == T, it will by default show the performance of the final hierarch model
+  # if include.hierarch == T & convert.to.lm == T, it will show the OLS performance of the final hierarch model
+  # else include.hierarch == F, it will by default only show the performance of the individual cluster models
+  # if include.hierarch == F & convert.to.lm == T, it will show the OLS performance of the individual cluster models
+  
+  # data_name <- deparse(substitute(cluster_data))
+  # # if cluster_data is valid or test set, remove the first column that contains Sensor type
+  # if (grepl("valid", data_name,fixed=T) == T | grepl("test", data_name,fixed=T) == T){
+  #   cluster_data <- lapply(cluster_data,function(x) x[,2:ncol(x)])
+  # }
+  
+  # cluster_test <- lapply(cluster_test,function(x) x[,2:ncol(x)])
+  
+  #---------list of functions to compute y_hat--------------
+  compute_expected_values_best_model = function(bma_model,test_data){
+    #test_data can be train data also if we are observing train model's performance
+    bma_model <- as.zlm(cluster_model,model=1) #convert to zlm model object to get the best model (highest PMP)
+    filtered_names <- attr(bma_model$terms,"term.labels")
+    filtered_names <- names(test_data)[(names(test_data) %in% filtered_names)]
+    filtered_data <- test_data[,filtered_names,drop=FALSE] #requires drop false when subsetting only one column
+    # y_hat<-predict(bma_model,newdata = filtered_data)
+    # y_hat
+    compute_expected_values(bma_model,filtered_data)
+  }
+  
+  compute_expected_values = function(bma_model,test_data){
+    #The predictive density is a mixture density based on the nmodels best models in a bma object (cf. nmodel in bms).
+    # The number of 'best models' to retain is therefore vital and should be set quite high for accuracy.
+    predicted_values <- pred.density(bma_model,newdata = test_data) #takes the weighted averaged models to predict
+    y_hat<-predicted_values$fit
+    y_hat
+  }
+  
+  
+  #---------list of functions to assess model performance--------------
+  rmse = function(residuals){sqrt(sum(residuals^2)/length(residuals))} 
+  
+  bma_model_performance = function(bma_model,test_data){ #weighted averaged model
+    model_name <- deparse(substitute(bma_model))
+    
+    y <- test_data[,1]#$Concentration
+    if (get.best.bma == T){
+      
+      if (class(bma_model) == "bma"){
+        bma_model <- as.zlm(bma_model,model=1)
+      }
+      
+      if (grepl("hierarch", model_name,fixed=T) == F ){
+        filtered_names <- attr(bma_model$terms,"term.labels")
+        filtered_names <- names(test_data)[(names(test_data) %in% filtered_names)]
+        test_data <- test_data[,filtered_names,drop=FALSE] #filter data
+      }
+      
+    }
+    
+    #vector
+    predicted_values <- pred.density(bma_model,test_data)
+    y_hat <- predicted_values$fit
+    predictive_density <- predicted_values$dyf(y_hat) #predictive density of predicted values
+    std_error <- predicted_values$std.err
+    interq<-quantile(predicted_values,c(0.05,0.95))
+    residuals<- y - y_hat
+    #scalar
+    RMSE <- rmse(residuals)
+    log_predictive_score <- lps.bma(predicted_values,y_hat)
+    #outputs a df, it will broadcast rmse & lps
+    data.frame(y,y_hat, predictive_density,y_5 = interq[,1],y_95=interq[,2],std_error,RMSE,log_predictive_score)
+  }
+  
+  
+  best_model_ols_performance = function(bma_model,test_data){ #only shows train model r2
+    if (class(bma_model) == "bma"){
+      best_lm <- lm(model.frame(as.zlm(bma_model))) #convert best bma model into a standard OLS model
+    }
+    
+    else {
+      best_lm <- lm(model.frame(bma_model)) #convert zlm model into a standard OLS model
+    }
+    summary_best_lm <- summary(best_lm)
+    ols_model_coeffs<-as.data.frame(summary_best_lm$coefficients)
+    adj_r2 <- summary_best_lm$adj.r.squared
+    RMSE <- rmse(summary_best_lm$residuals)
+    ols_model_coeffs$adj_r2 <- adj_r2
+    ols_model_coeffs$RMSE <- RMSE
+    ols_model_coeffs
+  }
+  
+  compute_RMSE_cluster_models = function(hierarch_model_input){
+    #first column is y, remaining columns are y_hat of individual cluster models
+    #output RMSE of individual cluster models
+    y <- hierarch_model_input[,1]
+    rmse_list <- lapply(hierarch_model_input[,2:ncol(hierarch_model_input)],function(yhat){
+      residuals <- y - yhat
+      rmse(residuals)
+    })
+    as.data.frame(do.call(cbind,rmse_list))
+  }
+  
+  compute_hierarch_model = function(hierarch_model_input_train,hierarch_model_input_test){
+    #hierarch_model_input has first column as y, and remaining columns as y_hat from trained individual cluster models
+    #hierarch_model_input is a trained dataset, derived from the expected values of individual cluster models
+    #fit zlm model to the 6 expected y output of 6 cluster models
+    g_list <- c("UIP","BRIC","EBL")
+    hierarch_model_list <- lapply(g_list,function(g_prior){
+      zlm_hierarch_model<-zlm(y_train~.,data=hierarch_model_input_train,g=g_prior) #train model using train data  
+      print(summary(zlm_hierarch_model))
+      if (convert.to.lm == T){
+        best_model_ols_performance(zlm_hierarch_model,hierarch_model_input_test)
+      }
+      else {
+        bma_model_performance(zlm_hierarch_model,hierarch_model_input_test) #compute performance using test data
+      }
+    })
+    names(hierarch_model_list) <- g_list
+    hierarch_model_list
+  }
+  
+  
+  #---------END FUNCTIONS--------------
+  
+  #---------CLUSTER MODELS----------
+  if (include.hierarch == F){ 
+    output <- lapply(base_model_list,function(model_prior){ 
+      cluster_model_list<-lapply(model_prior,function(g_prior){ #contains a list of cluster models
+        if (convert.to.lm == T){
+          model_perf <- mapply(best_model_ols_performance,g_prior,cluster_test,SIMPLIFY = F) #converts model to OLS
+        }
+        else {
+          model_perf <- mapply(bma_model_performance,g_prior,cluster_test,SIMPLIFY = F) #use BMA model
+        }
+        names(model_perf) <- names(g_prior)
+        model_perf
+      })
+      # if (plot.graph == T){
+      #   bind_rows(cluster_m)
+      # }
+      cluster_model_list
+    })
+    
+  }
+  
+  #---------HIERARCH MODELS----------
+  else { #then compute expected y_hat from each cluster models
+    output<-lapply(base_model_list,function(model_prior){ 
+      hierarch_model_list <- lapply(model_prior,function(g_prior){ #contains a list of cluster models
+        train_y_hat_list <- mapply(compute_expected_values,g_prior,cluster_train,SIMPLIFY = F)
+        train_y_hat <- as.data.frame(do.call(cbind,train_y_hat_list))
+        y_train<-cluster_train[[1]][,1]
+        hierarch_model_input_train <- cbind(y_train,train_y_hat)
+        
+        test_y_hat_list <- mapply(compute_expected_values,g_prior,cluster_test,SIMPLIFY = F)
+        test_y_hat <- as.data.frame(do.call(cbind,test_y_hat_list))
+        y_test<-cluster_test[[1]][,1]
+        hierarch_model_input_test <- cbind(y_test,test_y_hat)
+        
+        if (show.model.performance == T){
+          rmse_clusters<-compute_RMSE_cluster_models(hierarch_model_input_test)
+          print(rmse_clusters)
+        }
+        
+        compute_hierarch_model(hierarch_model_input_train,hierarch_model_input_test)
+      })
+      hierarch_model_list
+    })
+    
+  }
+  
+  
+  
+  output
+  
+}
+
+# HBMA_predict(TSS_bms_models,clustered_candidate_BBR_df,clustered_candidate_BBR_test,include.hierarch = F,get.best.bma = F,convert.to.lm = F,show.model.performance = T,plot.graph=T)
+```
+
+
+# Cluster models
+
+```{r}
+HBMA_clusters_train <- HBMA_predict(TSS_bms_models,clustered_candidate_BBR_df,clustered_candidate_BBR_df,include.hierarch = F,get.best.bma = F,convert.to.lm = F,show.model.performance = T,plot.graph=T)
+```
+
+```{r}
+HBMA_clusters_valid <- HBMA_predict(TSS_bms_models,clustered_candidate_BBR_df,clustered_candidate_BBR_valid,include.hierarch = F,get.best.bma = F,convert.to.lm = F,show.model.performance = T,plot.graph=T)
+```
+
+```{r}
+HBMA_clusters <- HBMA_predict(TSS_bms_models,clustered_candidate_BBR_df,clustered_candidate_BBR_test,include.hierarch = F,get.best.bma = F,convert.to.lm = F,show.model.performance = T,plot.graph=T)
+```
+
+
+
+# Hierarch models
+
+```{r}
+HBMA_hierarch_train <- HBMA_predict(TSS_bms_models,clustered_candidate_BBR_df,clustered_candidate_BBR_df,include.hierarch = T,get.best.bma = F,convert.to.lm = F,show.model.performance = T,plot.graph=T)
+```
+
+```{r}
+HBMA_hierarch_valid <- HBMA_predict(TSS_bms_models,clustered_candidate_BBR_df,clustered_candidate_BBR_valid,include.hierarch = T,get.best.bma = F,convert.to.lm = F,show.model.performance = T,plot.graph=T)
+```
+
+```{r}
+HBMA_hierarch <- HBMA_predict(TSS_bms_models,clustered_candidate_BBR_df,clustered_candidate_BBR_test,include.hierarch = T,get.best.bma = F,convert.to.lm = F,show.model.performance = T,plot.graph=T)
+```
+
+
+```{r}
+HBMA_predict(TSS_bms_models,clustered_candidate_BBR_df,clustered_candidate_BBR_test,include.hierarch = T,get.best.bma = F,convert.to.lm = F,show.model.performance = T,plot.graph=T)
+```
+
+```{r}
+nrow(HBMA_hierarch_train$uniform$UIP$UIP)
+nrow(HBMA_hierarch_valid$uniform$UIP$UIP)
+```
+
+```{r}
+HBMA_hierarch_train
+```
+
+
+```{r}
+HBMA_clusters$uniform$UIP$`0`
+HBMA_hierarch$uniform$UIP$UIP
+```
+
+## Check prediction of HBMA_hierarch with diff conc levels
+
+
+```{r}
+HBMA_conc_levels = function(HBMA_hierarch){
+  
+  flattened_hierarch <- flatten_nested_list(HBMA_hierarch)
+  RMSE_conc_levels<-lapply(flattened_hierarch,function(model){
+    model%>%
+      mutate(Conc_level = cut(y,breaks=seq(0,300,50),include.lowest=T))%>%
+      group_by(Conc_level)%>%
+      group_modify(~{
+        residuals <- .x$y - .x$y_hat
+        rmse<-sqrt(sum(residuals^2)/length(residuals))
+        rmse%>%
+          tibble::enframe(value="RMSE")
+      })%>%
+      dplyr::select(-name)
+  })
+  
+  HBMA_hierarch_RMSE_conc <- bind_rows(RMSE_conc_levels,.id="model_config")%>%
+    spread(Conc_level,RMSE)%>%
+    mutate_if(is.numeric,function(x)round(x,3))#%>%
+    # filter(grepl("random.EBL|random.UIP",model_config))
+  
+  # write.csv(HBMA_hierarch_RMSE_conc,'/Users/huiying/Documents/NTU/Drone/Machine_Learning/results_images/HBMA_hierarch_RMSE_conc.csv')
+  
+  HBMA_hierarch_RMSE_conc 
+  
+}
+HBMA_conc_levels(HBMA_hierarch)
+```
+## HBMA_hierarch_train
+```{r}
+# write.csv(
+  bind_rows(
+    lapply(HBMA_hierarch_train,function(m_prior){
+      g_prior_models<-lapply(m_prior,function(g_prior){
+        bind_rows(g_prior,.id="zlm_g_prior")
+      })
+      bind_rows(g_prior_models,.id="g_prior")
+    }),.id="m_prior")%>%
+    group_by(m_prior,g_prior,zlm_g_prior)%>%
+    summarise_at(vars(RMSE,log_predictive_score),mean)%>%
+    mutate_if(is.numeric,function(x) round(x,4))#,
+# '/Users/huiying/Documents/NTU/Drone/Machine_Learning/results_images/hierarch_model_train_performance.csv')
+```
+
+## HBMA_hierarch_valid
+```{r}
+# write.csv(
+  bind_rows(
+    lapply(HBMA_hierarch_valid,function(m_prior){
+      g_prior_models<-lapply(m_prior,function(g_prior){
+        bind_rows(g_prior,.id="zlm_g_prior")
+      })
+      bind_rows(g_prior_models,.id="g_prior")
+    }),.id="m_prior")%>%
+    group_by(m_prior,g_prior,zlm_g_prior)%>%
+    summarise_at(vars(RMSE,log_predictive_score),mean)%>%
+    mutate_if(is.numeric,function(x) round(x,4))#,
+# '/Users/huiying/Documents/NTU/Drone/Machine_Learning/results_images/hierarch_model_test_performance.csv')
+```
+
+## HBMA_hierarch_test
+```{r}
+# write.csv(
+  bind_rows(
+    lapply(HBMA_hierarch,function(m_prior){
+      g_prior_models<-lapply(m_prior,function(g_prior){
+        bind_rows(g_prior,.id="zlm_g_prior")
+      })
+      bind_rows(g_prior_models,.id="g_prior")
+    }),.id="m_prior")%>%
+    group_by(m_prior,g_prior,zlm_g_prior)%>%
+    summarise_at(vars(RMSE,log_predictive_score),mean)%>%
+    mutate_if(is.numeric,function(x) round(x,4))#,
+# '/Users/huiying/Documents/NTU/Drone/Machine_Learning/results_images/hierarch_model_test_performance.csv')
+```
+
+
+
+## RMSE of clusters_valid/test
+```{r}
+write.csv(
+  bind_rows(
+    dcast(
+      bind_rows(
+        lapply(HBMA_clusters,function(m_prior){
+        bind_rows(
+        lapply(m_prior,function(g_prior){ #list of clusters
+          bind_rows(g_prior,.id="Cluster")
+        })
+        ,.id="g_prior")
+      }),.id="m_prior")%>%
+        group_by(m_prior,g_prior,Cluster)%>%
+            summarise_at(vars(log_predictive_score),mean)
+    ,...~Cluster,value.var="log_predictive_score")%>%
+      mutate(mean = (`0`+`1`+`2`+`3`+`4`+`5`)/6)%>%
+      mutate_if(is.numeric,function(x) round(x,4)),
+    
+    dcast(
+      bind_rows(
+        lapply(HBMA_clusters,function(m_prior){
+        bind_rows(
+        lapply(m_prior,function(g_prior){ #list of clusters
+          bind_rows(g_prior,.id="Cluster")
+        })
+        ,.id="g_prior")
+      }),.id="m_prior")%>%
+        group_by(m_prior,g_prior,Cluster)%>%
+            summarise_at(vars(RMSE),mean)
+    ,...~Cluster,value.var="RMSE")%>%
+      mutate(mean = (`0`+`1`+`2`+`3`+`4`+`5`)/6)%>%
+      mutate_if(is.numeric,function(x) round(x,4))
+    ),
+  '/Users/huiying/Documents/NTU/Drone/Machine_Learning/results_images/cluster_models_test_performance.csv')
+```
+
+
+
+# cluster model plot (on valid data)
+```{r}
+scatter_plot_cluster_valid<-bind_rows(
+  lapply(HBMA_clusters_valid,function(m_prior){
+  bind_rows(
+  lapply(m_prior,function(g_prior){ #list of clusters
+    bind_rows(g_prior,.id="Cluster")
+  })
+  ,.id="g_prior")
+}),.id="m_prior")%>%
+  mutate("Model Config" = paste(m_prior,g_prior,sep="."))%>%
+  mutate(Cluster_name=paste0("Cluster ",Cluster))%>%
+  ggplot(aes(x=y_hat,y=y))+
+  geom_ribbon(mapping=aes(x=y_hat,y=y,ymin=y_5,ymax=y_95,alpha=0.7),fill='#9999FF',show.legend=F)+
+  # geom_point(size=1,alpha=0.5,shape=1)+
+  geom_point(aes(colour = predictive_density),size=1,alpha=0.5,shape=1)+
+  geom_abline(intercept=0,colour="red",linetype=2)+
+  facet_grid(`Model Config`~Cluster_name)+
+  theme_classic()+
+  scale_color_gradient(name="Predictive Density")+
+  labs(y="Observed TSS (mg/l)",x="Predicted TSS (mg/l)")
+
+scatter_plot_cluster_valid
+```
+# cluster model plot (on test data)
+
+```{r}
+#colour points with predictive density
+scatter_plot_cluster_test<-bind_rows(
+  lapply(HBMA_clusters,function(m_prior){
+  bind_rows(
+  lapply(m_prior,function(g_prior){ #list of clusters
+    bind_rows(g_prior,.id="Cluster")
+  })
+  ,.id="g_prior")
+}),.id="m_prior")%>%
+  mutate("Model Config" = paste(m_prior,g_prior,sep="."))%>%
+  mutate(Cluster_name=paste0("Cluster ",Cluster))%>%
+  ggplot(aes(x=y_hat,y=y))+
+  geom_ribbon(mapping=aes(x=y_hat,y=y,ymin=y_5,ymax=y_95,alpha=0.7),fill='#9999FF',show.legend=F)+
+  geom_point(aes(colour = predictive_density),size=1,alpha=0.5,shape=1)+
+  geom_abline(colour="red",intercept=0,linetype=2,show.legend=T)+
+  facet_grid(`Model Config`~Cluster_name)+
+  theme_classic()+
+  # guides(shape=guide_legend(override.aes=list(linetype=2)))+
+  # scale_color_manual(name="1:1 line",values=c("red"))+
+  scale_color_gradient(name="Predictive Density")+
+  labs(y="Observed TSS (mg/l)",x="Predicted TSS (mg/l)")
+scatter_plot_cluster_test
+```
+
+```{r}
+#combine valid and test plot
+scatter_plot_cluster <- ggarrange(scatter_plot_cluster_valid,scatter_plot_cluster_test,ncol=1,common.legend = T,legend = "right",labels = c("(a)","(b)"))
+scatter_plot_cluster
+ggsave('/Users/huiying/Documents/NTU/Drone/Machine_Learning/results_images/scatter_plot_cluster.png',scatter_plot_cluster,units="in",width=9, height=11.5)
+```
+
+
+# Hierarch models (scatter plot)
+
+```{r}
+scatter_plot_hierarch_valid <- bind_rows(flatten_nested_list(HBMA_hierarch_valid),.id="Model config")%>%
+  mutate(header=sprintf("%s\n(RMSE: %.3f)",`Model config`, RMSE))%>%
+  ggplot(aes(x=y_hat,y=y))+
+  # geom_ribbon(mapping=aes(x=y_hat,y=y,ymin=y_5,ymax=y_95,alpha=0.7),fill='#9999FF')+
+  geom_ribbon(mapping=aes(x=y_hat,y=y,ymin=y_5,ymax=y_95,alpha=0.5),fill='#9999FF',show.legend=F)+
+  geom_point(aes(colour = predictive_density),size=1,shape=1)+
+  geom_abline(colour="red",intercept=0,linetype=2,show.legend=T)+
+  facet_wrap(~header,ncol=3)+
+  theme_classic()+
+  # guides(shape=guide_legend(override.aes=list(linetype=2)))+
+  # scale_color_manual(name="1:1 line",values=c("red"))+
+  scale_color_gradient(name="Predictive Density")+
+  labs(y="Observed TSS (mg/l)",x="Predicted TSS (mg/l)")
+scatter_plot_hierarch_valid
+```
+
+
+
+```{r}
+scatter_plot_hierarch_test <- bind_rows(HBMA_hierarch$random$UIP$UIP, HBMA_hierarch$random$EBL$EBL,.id="g_prior")%>%
+  mutate_at(vars(g_prior),function(x){
+    ifelse(x=="1","random.UIP","random.EBL")
+  })%>%
+  mutate(header=sprintf("%s (RMSE: %.3f)",g_prior, RMSE))%>%
+  ggplot(aes(x=y_hat,y=y))+
+  # geom_ribbon(mapping=aes(x=y_hat,y=y,ymin=y_5,ymax=y_95,alpha=0.7),fill='#9999FF')+
+  geom_ribbon(mapping=aes(x=y_hat,y=y,ymin=y_5,ymax=y_95,alpha=0.5),fill='#9999FF',show.legend=F)+
+  geom_point(aes(colour = predictive_density),size=1,shape=1)+
+  geom_abline(colour="red",intercept=0,linetype=2,show.legend=T)+
+  facet_wrap(~header)+
+  theme_classic()+
+  # guides(shape=guide_legend(override.aes=list(linetype=2)))+
+  # scale_color_manual(name="1:1 line",values=c("red"))+
+  scale_color_gradient(name="Predictive Density")+
+  labs(y="Observed TSS (mg/l)",x="Predicted TSS (mg/l)")
+scatter_plot_hierarch_test
+```
+
+```{r}
+#combine valid and test plot
+scatter_plot_hierarch<- ggarrange(scatter_plot_hierarch_valid,scatter_plot_hierarch_test,ncol=1,common.legend = T,legend = "right",labels = c("(a)","(b)"),heights=c(3,1))
+scatter_plot_hierarch
+ggsave('/Users/huiying/Documents/NTU/Drone/Machine_Learning/results_images/scatter_plot_hierarch.png',scatter_plot_hierarch,units="in",width=8, height=10)
+```
+
+
+# benchmark with individual OBRA models (do in python)
+
+```{r}
+OBRA_models <- read.csv('/Users/huiying/Documents/NTU/Drone/Machine_Learning/individual_OBRA_model-performance.csv')
+names(OBRA_models) <- c("Cluster","Bands","Band_no","y","y_hat")
+OBRA_models
+
+```
+
+## OBRA models group prediction by diff conc levels
+```{r}
+OBRA_RMSE_conc <- OBRA_models%>%
+  mutate(new_Bands = str_replace_all(Bands,c("X"="","_"="/")))%>%
+  mutate(Conc_level = cut(y,breaks=seq(0,300,50),include.lowest=T))%>%
+  group_by(Cluster,new_Bands,Conc_level)%>%
+  group_modify(~{
+        residuals <- .x$y - .x$y_hat
+        rmse<-sqrt(sum(residuals^2)/length(residuals))
+        rmse%>%
+          tibble::enframe(value="RMSE")
+      })%>%
+  dplyr::select(-name)%>%
+  spread(Conc_level,RMSE)%>%
+  mutate_if(is.numeric,function(x) round(x,3))
+  # mutate(sum_RMSE = `[0,50]`+`(50,100]`+`(100,150]`+`(150,200]`+`(200,250]`+`(250,300]`)%>%
+  # arrange(sum_RMSE)
+# plot dodge bar chart
+write.csv(OBRA_RMSE_conc,'/Users/huiying/Documents/NTU/Drone/Machine_Learning/results_images/OBRA_RMSE_conc.csv')
+OBRA_RMSE_conc
+```
+
+
+
+
+```{r}
+plot_OBRA_RMSE = function(OBRA_models,scatter.plot=F){
+  
+  if (scatter.plot==F){
+    #-----plot bar chart of RMSE-------------
+    summarised_df<- OBRA_models%>%
+      mutate(new_Bands = str_replace_all(Bands,c("X"="","_"="/")))%>%
+      group_by(Cluster,new_Bands)%>%
+      group_modify(~{
+        residuals <- .x$y - .x$y_hat
+        rmse<-sqrt(sum(residuals^2)/length(residuals))
+        rmse%>%
+          tibble::enframe(value="RMSE")
+      })
+
+    cluster_number <- summarised_df%>%
+      group_by(Cluster)%>%
+      tally()
+
+    cluster_labels <- paste0("Cluster " ,c(0:5)) #labels u want to replace with
+    cluster_labels <- paste0(cluster_labels, " (n = ",cluster_number$n,")")
+    #names correspond to the original label
+    names(cluster_labels) <- c(0:5)
+    
+    print(summarised_df%>%
+      group_by(Cluster)%>%
+      summarise_at(vars(RMSE),mean))
+
+    summarised_df%>%
+      ggplot(aes(new_Bands,RMSE))+
+        geom_bar(stat="identity", position = "dodge")+
+        geom_text(aes(label=RMSE),stat="identity",colour = "white", vjust=1.5,nudge_x=-0.5,angle = 90,size=2.5)+
+        scale_y_continuous(breaks = seq(0, 50, by = 10))+
+        facet_wrap(~Cluster,scales="free_x",labeller = labeller(Cluster = cluster_labels))+
+        labs(x="Band Ratio")+
+        theme_classic()+
+        theme(strip.background=element_blank(),
+              strip.placement="outside",
+              axis.text.x = element_text(angle = 90, hjust = 1)
+              )
+  }
+  
+  else{
+    #-----plot scatter plots of each cluster-------------
+    cluster_list <- split(OBRA_models,OBRA_models$Cluster)
+    
+    lapply(cluster_list,function(cluster){
+      
+      rmse_cluster<-cluster%>%
+        mutate(new_Bands = str_replace_all(Bands,c("X"="","_"="/")))%>%
+        group_by(new_Bands)%>%
+        group_modify(~{
+          residuals <- .x$y - .x$y_hat
+          rmse<-sqrt(sum(residuals^2)/length(residuals))
+          rmse%>%
+            tibble::enframe(value="RMSE")
+        })
+      
+      bands_labellers <- paste0(rmse_cluster$new_Bands," (RMSE:",round(rmse_cluster$RMSE,1),")")
+      names(bands_labellers) <-rmse_cluster$new_Bands
+        
+      cluster%>%
+        mutate(new_Bands = str_replace_all(Bands,c("X"="","_"="/")))%>%
+        ggplot(aes(x=y_hat,y=y))+
+        geom_point(size=1,alpha=0.5,shape=1)+
+        geom_abline(intercept=0,colour="red",linetype=2)+
+        facet_wrap(~new_Bands,labeller = labeller(new_Bands = bands_labellers))+
+        theme_classic()+
+        labs(y="Observed TSS (mg/l)",x="Predicted TSS (mg/l)")
+        })
+    }
+
+}
+
+plot_OBRA_RMSE(OBRA_models,scatter.plot = F)
+```
+
+```{r}
+OBRA_bar_RMSE <- plot_OBRA_RMSE(OBRA_models,scatter.plot = F)
+OBRA_bar_RMSE
+# ggsave('/Users/huiying/Documents/NTU/Drone/Machine_Learning/results_images/OBRA_bar_RMSE.png',OBRA_bar_RMSE,units="in",width=9, height=6)
+```
+
+```{r}
+OBRA_models%>%
+      mutate(new_Bands = str_replace_all(Bands,c("X"="","_"="/")))%>%
+      group_by(Cluster,new_Bands)%>%
+      group_modify(~{
+        residuals <- .x$y - .x$y_hat
+        rmse<-sqrt(sum(residuals^2)/length(residuals))
+        rmse%>%
+          tibble::enframe(value="RMSE")
+      })%>%
+  dplyr::select(-name)%>%
+  mutate(Cluster=paste("Cluster", Cluster))%>%
+  ggplot(aes(x= reorder(new_Bands,RMSE),RMSE))+
+  geom_bar(stat ="identity")+
+  facet_wrap(~Cluster,scales="free_x")+
+  labs(x="Band-ratios",y="RMSE")+
+  theme_classic()+
+    theme(strip.background=element_rect(fill="grey",colour = "white"), 
+        strip.text = element_text(face="bold"),
+        strip.placement="outside",
+        axis.text.x = element_text(angle = 90, hjust = 1), 
+        #text=element_text(size=12),
+       legend.position="bottom"
+        )
+```
+
+
+```{r}
+OBRA_bar_conc_level_RMSE <- OBRA_models%>%
+  mutate(new_Bands = str_replace_all(Bands,c("X"="","_"="/")))%>%
+  mutate(Conc_level = cut(y,breaks=seq(0,300,50),include.lowest=T))%>%
+  mutate_at(vars(Cluster),function(x) paste0("Cluster ",x))%>%
+  group_by(Cluster,new_Bands,Conc_level)%>%
+  group_modify(~{
+        residuals <- .x$y - .x$y_hat
+        rmse<-sqrt(sum(residuals^2)/length(residuals))
+        rmse%>%
+          tibble::enframe(value="RMSE")
+      })%>%
+  dplyr::select(-name)%>%
+    ggplot(aes(x=new_Bands,y=RMSE,fill=Conc_level))+
+    geom_bar(position="dodge", stat="identity")+
+    facet_wrap(~Cluster,scales="free_x")+
+    labs(x="Band Ratio")+
+    scale_y_continuous(breaks = seq(0, 80, by = 10))+
+    theme_classic()+
+    theme(strip.background=element_blank(),
+          strip.placement="outside",
+          axis.text.x = element_text(angle = 90, hjust = 1)
+          )+
+    scale_fill_manual(name="Concentration levels (mg/l)",
+    values= rev(colorRampPalette(brewer.pal(6,"BrBG"))(6)))
+OBRA_bar_conc_level_RMSE
+```
+
+```{r}
+OBRA_RMSE <- ggarrange(OBRA_bar_RMSE,OBRA_bar_conc_level_RMSE,ncol=1,common.legend = F,legend = "bottom",labels = c("(a)","(b)"))
+OBRA_RMSE
+ggsave('/Users/huiying/Documents/NTU/Drone/Machine_Learning/results_images/OBRA_RMSE.png',OBRA_RMSE,units="in",width=9, height=12)
+```
+
+
+```{r}
+cluster_OBRA_models <- plot_OBRA_RMSE(OBRA_models,scatter.plot = T)
+cluster_OBRA_models 
+```
+
+```{r}
+for (i in seq_along(cluster_OBRA_models)){
+  ggsave(paste0('/Users/huiying/Documents/NTU/Drone/Machine_Learning/results_images/OBRA_scatterplot_cluster_',i-1,".png"),cluster_OBRA_models[[i]],units="in",width=7, height=5)
+}
+```
+
+if OBRA can perform badly on a simulated dataset in a controlled environment, then how reliable it is when used on field results?
+
+
+# Comparison of cluster models between OBRA, XGBoost and HBMA-OMBA on test set
+
+```{r}
+best_cluster_test <-bind_rows(
+lapply(HBMA_clusters$random$EBL,function(cluster){
+  cluster%>%
+      mutate(Conc_level = cut(y,breaks=seq(0,300,50),include.lowest=T))%>%
+      group_by(Conc_level)%>%
+      group_modify(~{
+        residuals <- .x$y - .x$y_hat
+        rmse<-sqrt(sum(residuals^2)/length(residuals))
+        rmse%>%
+          tibble::enframe(value="RMSE")
+      })%>%
+    dplyr::select(-name)
+}),.id="Cluster")%>%
+  pivot_wider(id_cols=Cluster,names_from=Conc_level,values_from=RMSE)
+
+best_cluster_test
+
+OBRA_RMSE_cluster<- OBRA_RMSE_conc%>%
+  group_by(Cluster)%>%
+  summarise_if(is.numeric,mean)%>%
+  mutate(Cluster=as.character(Cluster))
+OBRA_RMSE_cluster
+
+HXGB_cluster_test$RMSE_conc_levels
+```
+
+```{r}
+list(OBRA = OBRA_RMSE_cluster,XGBoost = HXGB_cluster_test$RMSE_conc_levels, HBMA_OMBRA = best_cluster_test )%>%
+  bind_rows(.id="Model")%>%
+  mutate(Cluster = paste("Cluster",Cluster))%>%
+  melt(id.vars=c("Model","Cluster"))%>%
+  ggplot(aes(fill=Model, y=value, x=variable)) + 
+    geom_bar(position="dodge", stat="identity")+
+  facet_wrap(~Cluster)+
+  labs(x="Concentration levels (mg/l)",y="RMSE")+
+  theme_classic()+
+    theme(strip.background=element_rect(fill="grey",colour = "white"), 
+        strip.text = element_text(face="bold"),
+        strip.placement="outside",
+        axis.text.x = element_text(angle = 90, hjust = 1), 
+        #text=element_text(size=12),
+       legend.position="bottom"
+        )
+```
+
+

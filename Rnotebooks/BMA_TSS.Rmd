@@ -1,0 +1,1290 @@
+---
+title: "BMA_OBRA"
+author: "Pak Hui Ying"
+date: "9/14/2021"
+output: html_document
+---
+
+```{r}
+library(ggplot2)
+library(dplyr)
+library(reshape2)
+library(stats)
+library(tidyr)
+library(tidyverse)
+library(stringi)
+library(stringr)
+library(BMS)
+library(FactoMineR)
+library(ggbiplot)
+library(factoextra)
+library(RColorBrewer)
+```
+
+```{r}
+TSS_df
+```
+
+```{r}
+TSS_avg <- dcast(TSS_df,...~Wavelength,value.var="Reflectance")
+TSS_avg
+```
+# Naive BMA
+```{r}
+non_BR_BMA = function(df){
+  df<-df[,c(2,33:ncol(df))]
+  naive_model <- bms(df)
+  #topmodels.bma(naive_model)[,1:3] #prints out the top 3 model, 1st column is the most important model
+  #image(naive_model,yprop2pip=T) #y axis scaled proportional to PIP. the thicker the row, the more important the variable in explaining the data
+  bms(df, burn = 50000, iter = 1e+06, g = "BRIC", mprior = "uniform", nmodel = 2000, mcmc = "bd", user.int = F)
+  #we find the correlation between iteration counts and analytical PMPs for the 2000 best models 
+}
+
+non_BR_BMA(TSS_avg)
+```
+
+
+```{r}
+bms(TSS_avg[,c(2,9:ncol(TSS_avg))])
+```
+
+
+```{r}
+TSS_band_ratio <- read.csv('/Users/huiying/Documents/NTU/Drone/Machine_Learning/TSS_band_ratio.csv',header=T)
+head(TSS_band_ratio)
+```
+
+
+
+```{r}
+sapply(names(TSS_band_ratio[,c(7:ncol(TSS_band_ratio))]),function(x){
+  x1<-gsub("X",'',x)
+  x1
+})
+```
+
+
+2^1830 model combinations is crazy... we have to reduce the number of covariates
+- Running naive BMA with all the covariates result in rank deficiency --> need to reduce number of covariates
+- Ensemble methods to reduce number of covariates/identify the candidate band ratios before applying BMA. but this may be a bit flawed because intentionally omit the covariates that give poor result
+- PCA to reduce number of covariates, but maybe this is better because u pick the covariates that can explain the largest variation in data, and remove highly collinear data, but may also pick out noisy variables
+
+# Split df into different sensor angles
+Why make sensor angle the main splitting variable? because this is the part we can control. azimuth, altitude are all environmental factors that varies a lot but sensor angle is the only variable that is user defined
+
+# flatten nested list recursively
+
+```{r}
+flatten_nested_list = function(x) {
+  if (!inherits(x, "list")) return(list(x))
+  else return(unlist(c(lapply(x, flatten_nested_list)), recursive = FALSE))
+}
+```
+
+
+# Import files
+
+```{r}
+import_TSS_files = function(prefix,folderpath){
+
+  #returns a list of filepath of csv file
+  csvfiles = list.files(
+  path = folderpath,        # directory to search within
+  pattern = paste0(prefix,".*.csv$"),
+  # pattern = "best_candidate_lbr.*.csv$", # regex pattern
+  recursive = FALSE,          # search subdirectories
+  full.names = TRUE          # return the full path
+  )
+
+ name_files<-lapply(csvfiles,function(x){
+    x1<-gsub(".*/","",x)
+    x2<-gsub(".csv","",x1)
+    x2
+  })
+ 
+ 
+  #read the csv files into a df
+  #returns a list of dataframe
+  myfiles <- lapply(csvfiles,function(x){
+    read.csv(x,header=T)
+  })
+  
+  names(myfiles) <- unlist(name_files)
+  
+  myfiles
+ 
+}
+```
+
+# TSS_sensor_angle_train_test
+
+
+```{r}
+TSS_sensor_angle_train_test <-import_TSS_files("TSS_sensor_angle",'/Users/huiying/Documents/NTU/Drone/Machine_Learning')
+TSS_sensor_angle_train_test <- lapply(TSS_sensor_angle_train_test,function(x){
+  wavelength_names <- names(x)[7:1836]
+  new_wavelength_names<-sapply(wavelength_names,function(x){
+    x1<-gsub("X",'',x)
+    split_x1<-as.numeric(unlist(str_split(x1,"_")))
+    sprintf("X%0.2f_%0.2f", split_x1[1],split_x1[2])
+  })
+  
+  new_col_names <- c(names(x)[1:6],new_wavelength_names,names(x)[1837])
+  names(x)<-new_col_names
+  split(x,x$dataset)
+})
+
+TSS_sensor_angle_train_test[[1]]
+```
+
+```{r}
+names(TSS_sensor_angle_train_test) #each of these dfs have their own train and test set
+```
+
+# Train data (TSS_sensor_angle_train)
+
+```{r}
+TSS_sensor_angle_train<-bind_rows(lapply(TSS_sensor_angle_train_test,function(x){
+  x$train
+}),.id = "Sensor_Angle_df")
+head(TSS_sensor_angle_train)
+```
+
+# Test data (TSS_sensor_angle_test)
+
+```{r}
+TSS_sensor_angle_test<-bind_rows(lapply(TSS_sensor_angle_train_test,function(x){
+  x$test
+}),.id = "Sensor_Angle_df")
+head(TSS_sensor_angle_test)
+```
+
+
+# ENsemble Band RAtio Selection (ENBRAS)
+
+## Import candidate BR from ensemble/bagging
+
+sample with replacement from different configurations (sensor angle, azimuth, altitude), from the different distributions of the bagged data, we pick out the candidate BBRs
+
+```{r}
+candidate_BR <- import_TSS_files("TSS_train_concat_best_candidate", '/Users/huiying/Documents/NTU/Drone/Machine_Learning')
+head(candidate_BR[1])
+```
+
+
+## distinct bands from ENBRAS
+```{r}
+ensemble_selected_covariates <- bind_rows(lapply(candidate_BR,function(x){
+  x%>%
+    distinct(b0,b1,.keep_all = T)
+}),.id="Test ratio")%>%
+    distinct(b0,b1,.keep_all = T)%>%
+  arrange(b0,b1)%>%
+    mutate(column_name = sprintf("X%0.2f_%0.2f", b0,b1))
+ensemble_selected_covariates
+```
+
+80 bands selected out of 1830 band ratio combinations...
+Still a lot of covariates. 
+- Cluster them into different groups, and aggregate each group as one model bundle. then we have N groups of model bundles and then perform BMA? 
+- Cluster them into groups --> N groups. For each group, we perform BMA
+
+## OBRA test data
+
+
+```{r}
+OBRA_test_data = function(test_data,ENBRAS_bands){
+  #this function uses the coeff and intercept of the bands selected in ENBRAS
+  #and created a y_hat output from these coeff and intercept
+  
+  ENBRAS_bands <- ENBRAS_bands%>%
+     mutate(column_name = sprintf("X%0.2f_%0.2f", b0,b1))
+  column_names <- ENBRAS_bands$column_name
+  coeff <- ENBRAS_bands$coeff
+  intercept <- ENBRAS_bands$intercept
+  y<-test_data$Concentration
+  
+  arguments_lm<-mapply(list,column_names,coeff,intercept,SIMPLIFY = F) #list in a list
+  
+  names(arguments_lm) <- column_names
+  compute_yhat = function(col_name,coef,incpt){
+    x<-test_data[,col_name]
+    y_hat <- x*coeff + incpt
+    y_hat
+  }
+  
+  # arguments_lm[2]
+  
+  y_hat_list<-as.data.frame(do.call(cbind,lapply(arguments_lm,function(arg){
+    do.call(compute_yhat,arg)
+  })))
+  y_hat_list
+  y_hat_df<-cbind(y,y_hat_list)
+  print(y_hat_df)
+
+  RMSE_df<-as.data.frame(do.call(rbind,lapply(y_hat_list,function(y_hat){
+    residuals<-y_hat - y
+    RMSE<-sqrt(sum(residuals^2)/length(residuals))
+    RMSE
+  })))
+  RMSE_df$R2_train<-ENBRAS_bands$r2 #V1 is the RMSE of the test data 
+  RMSE_df
+  
+}
+RMSE_OBRA_test<-OBRA_test_data(TSS_sensor_angle_test,ensemble_selected_covariates)
+RMSE_OBRA_test
+```
+*Discussion*: RMSE 
+
+# Clustering of bands using ENBRAS
+
+```{r}
+clustered_candidates_concat_dup<-read.csv('/Users/huiying/Documents/NTU/Drone/Machine_Learning/clustered_candidates_concat_dup.csv')
+
+clustered_candidates_concat_dup
+```
+### clustered_candidate_BBR
+```{r}
+clustered_candidate_BBR_list = function(clustered_df){
+  clusters<-split(clustered_df,clustered_df$class)
+  lapply(clusters,function(x){
+    x%>%
+      group_by(b0,b1)%>%
+      tally()%>%
+      mutate(probability = n/sum(n))
+  })
+}
+  
+clustered_candidate_BBR = clustered_candidate_BBR_list(clustered_candidates_concat_dup)
+clustered_candidate_BBR
+```
+6 clusters of candidate BBRs in total
+
+
+#### clustered_candidate_BBR_df (train data)
+
+```{r}
+clustered_candidate_BBR_df<-lapply(clustered_candidate_BBR,function(cluster_i_candidate_BBRs){
+  cluster_i_candidate_BBRs <- cluster_i_candidate_BBRs%>%
+    # mutate(column_name = paste0("X",b0,".",b1))
+    mutate(column_name = sprintf("X%0.2f_%0.2f", b0,b1))
+  
+  cluster_BBRs <- cluster_i_candidate_BBRs$column_name
+
+  col_names<-c("Concentration",cluster_BBRs)
+  # print(length(col_names))
+  col_names <- names(TSS_sensor_angle_train)[(names(TSS_sensor_angle_train) %in% col_names)] #using train data
+  df.subset <- TSS_sensor_angle_train[,col_names]
+  df.subset
+})
+
+clustered_candidate_BBR_df
+```
+
+#### clustered_candidate_BBR_valid & clustered_candidate_BBR_test
+```{r}
+clustered_candidate_BBR_test<-lapply(clustered_candidate_BBR,function(cluster_i_candidate_BBRs){
+  cluster_i_candidate_BBRs <- cluster_i_candidate_BBRs%>%
+    # mutate(column_name = paste0("X",b0,".",b1))
+    mutate(column_name = sprintf("X%0.2f_%0.2f", b0,b1))
+  
+  cluster_BBRs <- cluster_i_candidate_BBRs$column_name
+
+  # col_names<-c("Sensor_Angle_df","Concentration",cluster_BBRs)
+  col_names<-c("Concentration",cluster_BBRs)
+  # print(length(col_names))
+  col_names <- names(TSS_sensor_angle_test)[(names(TSS_sensor_angle_test) %in% col_names)] #using train data
+  
+  df<-TSS_sensor_angle_test%>%
+    dplyr::mutate(id=row_number())
+  set.seed(1)
+  valid<-df%>%
+    sample_frac(0.5,replace=F)
+  
+  test<- anti_join(df,valid,by="id")
+  
+  # df.subset <- TSS_sensor_angle_test[,col_names]
+  # df.subset
+  valid_data <- valid[,col_names]
+  test_data <- test[,col_names]
+  
+  list(valid=valid_data,test=test_data)
+  
+})
+
+clustered_candidate_BBR_valid<-lapply(clustered_candidate_BBR_test,function(x){x$valid})
+clustered_candidate_BBR_test<-lapply(clustered_candidate_BBR_test,function(x){x$test}) #overwrite clustered_candidate_BBR_test
+clustered_candidate_BBR_test
+```
+
+
+# Hierarchical BMA
+
+## aggregating base models in each cluster
+```{r}
+aggregating_base_models = function(train_data,cluster_i_candidate_BBRs,g_param="BRIC",mprior_param="uniform",mcmc_param="bd",user.int_param=TRUE){
+  cluster_i_candidate_BBRs <- cluster_i_candidate_BBRs%>%
+    mutate(column_name = sprintf("X%0.2f_%0.2f", b0,b1))
+  
+  cluster_BBRs <- cluster_i_candidate_BBRs$column_name
+
+  col_names<-c("Concentration",cluster_BBRs)
+  col_names <- names(train_data)[(names(train_data) %in% col_names)]
+  df.subset <- train_data[,col_names]
+  df.subset
+  
+  # df.subset[is.na(df.subset) == F]
+  #g="BRIC" corresponds to the benchmark prior suggested by Fernandez, Ley and Steel (2001), i.e g=max(N, K^2), where K is the total number of covariates;
+  #g="hyper" takes the 'hyper-g' prior distribution (as in Liang et al., 2008) with the default hyper-parameter a set such that the prior expected shrinkage factor conforms to 'UIP';
+# This hyperparameter a can be adjusted (between 2<a<=4) by setting g="hyper=2.9", for instance.
+# Alternatively, g="hyper=UIP" sets the prior expected value of the shrinkage factor equal to that of UIP (default), g="hyper=BRIC" sets it according to BRIC 
+  
+  #mprior="uniform" employs the uniform model prior;
+  #mprior="pip" allows for custom prior inclusion probabilities (cf. mprior.size);
+  # bms(df.subset, burn = 5000, iter = 1e+06, g = "BRIC", mprior = "uniform", nmodel = 500, mcmc = "bd", user.int = F)
+  # bms_BRIC_uniform <- bms(df.subset, burn = 50000, iter = 1e+06, g = "BRIC", mprior = "uniform", nmodel = 2000, mcmc = "bd")
+  # bms_BRIC_uniform
+  
+  bms(df.subset, burn = 50000, iter = 1e+06, g = g_param, mprior = mprior_param, nmodel = 2000, mcmc = mcmc_param,user.int=user.int_param)
+}
+
+aggregating_base_models(TSS_sensor_angle_train,clustered_candidate_BBR[[3]], g_param="BRIC",mprior_param="uniform",mcmc_param="bd")
+```
+
+
+
+
+
+
+## base BMA models
+
+### base BMA models with different model parameters
+```{r}
+m_prior_list <- c("uniform","random")
+g_list <- c("UIP","BRIC","EBL")
+
+TSS_bms_models <- sapply(m_prior_list,function(m_prior_param){
+  sapply(g_list,function(g_param){
+    
+    lapply(clustered_candidate_BBR,function(x){
+  aggregating_base_models(TSS_sensor_angle_train,x,
+                          g_param=g_param,
+                          mprior_param=m_prior_param,
+                          mcmc_param="rev.jump")
+})
+    
+  },simplify = F)
+},simplify = F)
+```
+## Compare PIPs across different model configurations
+```{r}
+# TSS_bms_models$uniform$UIP$`0`
+compare_bms_models = function(nested_list){
+
+  n = 6 #no. of config
+
+  for (i in c(1:6))
+    { 
+      cluster_0 <- lapply(nested_list,function(mprior_i){
+        lapply(mprior_i,function(g_i){
+          g_i[[i]]
+        })
+      })
+    
+      flattened_list_0 <- flatten_nested_list(cluster_0) #diff model configurations
+      config_names <- names(flattened_list_0)
+      vector_cluster_0 <- as.vector(flattened_list_0)
+      do.call(plotComp,c(vector_cluster_0, add.grid=F,include.legend=F)) #parse list as arguments
+      title(paste("Cluster",i-1))
+      legend("topright", legend=config_names, pch=c(1:n),col=brewer.pal(n, "Dark2"), title="Legend",cex=0.6,bty="n")
+    }
+  
+}
+
+compare_bms_models(TSS_bms_models)
+```
+
+## Get best OLS bma model for each cluster
+
+
+```{r}
+get_best_bma_ols_model = function(nested_list,model_number,output_coef=T){
+#this function outputs the _OLS_ coeff of the _best_ BMA model rather than the weighted averaged of the models
+  #if output_coef == T, it will output coefficients, else it will output the model
+  
+  sapply(c(1:6),function(cluster_i){ 
+      cluster_0 <- lapply(nested_list,function(mprior_i){
+        lapply(mprior_i,function(g_i){
+          g_i[[cluster_i]]
+        })
+      })
+    
+      flattened_list_0 <- flatten_nested_list(cluster_0) #diff model configurations
+      #since different model config e.g. UIP,BRIC,uniform,random all leads to the same OLS model and results,
+      #we will just choose 1 out of the model configs
+      
+      # config_names <- names(flattened_list_0)
+      # as.data.frame(do.call(cbind,lapply(flattened_list_0,function(model_config){
+      #   topmodels.bma(model_config)[,model_number] #select the best model
+      # })))
+      model <- flattened_list_0[[1]]
+      best_lm <- lm(model.frame(as.zlm(model))) #convert best bma model into a standard OLS model
+      summary_best_lm <- summary(best_lm)
+      ols_model_coeffs<-as.data.frame(summary_best_lm$coefficients)
+      adj_r2 <- summary_best_lm$adj.r.squared
+      RMSE <- sqrt(sum(summary_best_lm$residuals^2)/length(summary_best_lm$residuals))
+      ols_model_coeffs$adj_r2 <- adj_r2
+      ols_model_coeffs$RMSE <- RMSE
+      
+      if (output_coef == T){
+        ols_model_coeffs
+      }
+      else {
+        best_lm
+      }
+      
+      # model_config_list<-lapply(flattened_list_0,function(model){
+      #   best_lm <- lm(model.frame(as.zlm(model))) #convert best bma model into a standard OLS model
+      #   summary_best_lm <- summary(best_lm)
+      #   ols_model_coeffs<-as.data.frame(summary_best_lm$coefficients)
+      #   adj_r2 <- summary_best_lm$adj.r.squared
+      #   ols_model_coeffs$adj_r2 <- adj_r2
+      #   if (output_coef == T){
+      #     ols_model_coeffs
+      #   }
+      #   else {
+      #     best_lm
+      #   }
+      #   
+      #   # list(ols_model_coeffs,adj_r2) 
+      # })
+      # 
+      # 
+      # model_config_list[[1]]
+      
+      }
+    ,simplify=F)
+  
+  }
+
+best_bma_ols_model<-get_best_bma_ols_model(TSS_bms_models,1,output_coef=F)
+get_best_bma_ols_model(TSS_bms_models,1,output_coef=T)
+best_bma_ols_model
+```
+
+
+
+## Get expected coefficient estimates of best bma model from each cluster
+
+```{r}
+get_coef_model = function(nested_list,model_number){
+  #this function outputs the coeff estimate for the best BMA model
+#model_number, can be an int or a vector
+  sapply(c(1:6),function(cluster_i){ 
+      cluster_0 <- lapply(nested_list,function(mprior_i){
+        lapply(mprior_i,function(g_i){
+          g_i[[cluster_i]]
+        })
+      })
+    
+      flattened_list_0 <- flatten_nested_list(cluster_0) #diff model configurations
+      
+      config_names <- names(flattened_list_0)
+      as.data.frame(do.call(cbind,lapply(flattened_list_0,function(model_config){
+        # topmodels.bma(model_config)[,1] #select the best model
+        # beta.draws.bma(model_config)[,1]#select the best model
+        beta.draws.bma(model_config)[,model_number]
+      })))}
+    ,simplify=F)
+  
+  }
+
+get_coef_model(TSS_bms_models,c(1))
+```
+*Discussion*: coefficient estimates of OLS and BMA is very similar, except the converted OLS model has an intercept
+
+```{r}
+map(flatten_nested_list(TSS_bms_models),coef)
+```
+
+
+- *Post Mean* displays the coefficients _averaged over all models_, including the models wherein the variable was not contained (implying that the coefficient is zero in this case). The covariate complaints has a comparatively large coefficient and seems to be most important. 
+- The importance of the variables in explaining the data is given in the first column *PIP* which represents posterior inclusion probabilities 
+- The coefficients’ posterior standard deviations (*Post SD*) reflect further evidence: complaints is certainly positive, while advance is most likely negative. In fact, the coefficient sign can also be inferred from the fourth column *Cond.Pos.Sign*, the ’posterior probability of a posi- tive coefficient expected value conditional on inclusion’, respectively ’sign certainty’.
+- In contrast, the corresponding number for privileges is near to zero, i.e. in virtually all models that include privileges, its coefficient sign is negative. Finally, the last column *Idx* denotes the index of the variables’ appearance in the original data set, as our results are obviously sorted by PIP.
+- the posterior _expected model size_ (i.e. the average number of included regressors),
+
+## Visualise top few models PIP contribution
+
+
+```{r}
+map(flatten_nested_list(TSS_bms_models),image)
+```
+first column cummulative model probabilities means it will all add up to 1, the first model already contributes to 29% of the total posterior model probability
+Here, blue color corresponds to a positive coefficient, red to a negative coefficient, and white to non-inclusion (a zero coefficient).
+
+### Select top best models based on cummulative PMP
+
+```{r}
+get_top_bma_model = function(nested_list,thres){
+  #selects top models based on cummulative PMPs (MCMC), set threshold PMP as 0.8
+  #thres = threshold between 0 and 1
+
+    table_of_number_best_models <- lapply(c(1:6),function(cluster_i){ 
+        cluster_0 <- lapply(nested_list,function(mprior_i){
+          lapply(mprior_i,function(g_i){
+            g_i[[cluster_i]]
+          })
+        })
+      
+        flattened_list_0 <- flatten_nested_list(cluster_0) #diff model configurations
+        flattened_list_0 <-as.vector(flattened_list_0)
+        config_names <- names(flattened_list_0)
+        # as.data.frame(do.call(cbind,lapply(flattened_list_0,function(model_config){
+        #   topmodels.bma(model_config)[,1] #select the best model
+        # })))
+        do.call(cbind,
+          lapply(flattened_list_0,function(model_config){
+            PMP_MCMC<-pmp.bma(model_config)[,2]
+            sum(cumsum(PMP_MCMC) < thres) #first n models with cumsum of PMP <= 0.8
+          })
+        )
+        
+        }#,simplify=F
+      )
+  
+  #names(table_of_number_best_models) <- c(0:5)
+  
+  #bind_rows(table_of_number_best_models,.id="Cluster")
+    data.frame(Cluster=c(0:5), do.call(rbind,table_of_number_best_models))
+    
+  }
+
+top_n_bma_models <- get_top_bma_model(TSS_bms_models,0.8)
+top_n_bma_models
+```
+uniform model prior results in the smallest number of top few models having 80% of total PMP --> results in more parsimonious final model
+EBL g-priors resulted in much bigger models
+Uniform.BRIC favoured 
+
+### Select best bma models (zlm cluster models)
+```{r}
+get_best_bma_models = function(nested_list){
+  lapply(nested_list,function(model_prior){
+    lapply(model_prior,function(g_prior){
+      lapply(g_prior,function(cluster_model){
+        # class(cluster_model)
+        model_best <- as.zlm(cluster_model,model=1)
+        model_best
+      })
+    })
+  })
+}
+best_bma_models<-get_best_bma_models(TSS_bms_models)
+best_bma_models
+```
+
+
+
+
+
+```{r}
+bma_model_performance = function(bma_model,data){
+  #make sure bma_model and data comes from the same cluster!
+  #data can be train or test data
+  
+  predicted_values <- pred.density(bma_model,data)
+  y_hat <- predicted_values$fit
+  std_error <- predicted_values$std.err
+  
+  residuals<- data$Concentration - y_hat
+  RMSE<-sqrt(sum(residuals^2)/length(residuals))
+  
+  g_param<-bma_model$arguments$g
+  mprior_param<-bma_model$arguments$mprior
+  log_predictive_score <- lps.bma(predicted_values,data$Concentration)
+  print(sprintf("g: %s, mprior: %s, RMSE: %.3f,log predictive score: %.3f",g_param,mprior_param,RMSE,log_predictive_score))
+  
+  interq<-quantile(predicted_values,c(0.05,0.95))
+  # print(interq)
+        
+  data.frame(y=data$Concentration,y_hat,y_5 = interq[,1],y_95=interq[,2], std_error)
+}
+  
+bma_model_performance(TSS_bms_models$uniform$UIP$`2`,clustered_candidate_BBR_df$`2`)
+```
+
+
+
+# Next level BMA
+
+## Predicted values from each cluster (clusters_df_list) (best model)
+
+### create_next_level_BMA_best_model
+```{r}
+create_next_level_BMA_best_model = function(bma_model_list,cluster_list){
+  #data can be train or test data
+  #outputs a df with columns as the cluster model's predicted values via the BMA weighted averaged model (instead of just the best model)
+  
+  cluster_predicted_values<-lapply(bma_model_list,function(model_prior){
+    lapply(model_prior,function(model_list){ #model_lists contains a list of model clusters
+      
+      compute_expected_values = function(bma_model,data){
+        filtered_names <- attr(bma_model$terms,"term.labels")
+        filtered_names <- names(data)[(names(data) %in% filtered_names)]
+        filtered_data <- data[,filtered_names,drop=FALSE] #requires drop false when subsetting only one column
+        y_hat<-predict(bma_model,newdata=filtered_data)
+        y_hat
+        # pred_object <-pred.density(bma_model,newdata = filtered_data)
+        # pred_object$fit
+        # pred_object$dyf(data$Concentration)
+      }
+      #this creates a df where each column is the predicted values of each cluster model
+      #this is because we want to combine the cluster models to form a final BMA model
+      # mapply(compute_expected_values,model_list,cluster_list,SIMPLIFY = F)[[1]]
+      cluster_models <- as.data.frame(do.call(cbind,mapply(compute_expected_values,model_list,cluster_list,SIMPLIFY = F))) #each model is associated to the cluster train data
+      y<-cluster_list[[1]]$Concentration #doesnt matter which cluster cus all the concentration value is the same
+      cbind(y,cluster_models)
+    })
+  })
+  
+  cluster_predicted_values
+  
+}
+
+best_model_clusters_df_list<-create_next_level_BMA_best_model(best_bma_models,clustered_candidate_BBR_df)
+best_model_clusters_df_list
+```
+
+### Individual cluster models train RMSE (best bma model)
+```{r}
+#this outputs the RMSE of individual cluster models
+do.call(rbind,lapply(flatten_nested_list(best_model_clusters_df_list),function(model_config){
+    y <- model_config[,1]
+    as.data.frame(do.call(cbind,
+    lapply(model_config[,c(2:7)],function(predicted_y){
+      residuals <- predicted_y - y
+      RMSE<- sqrt(sum(residuals^2)/length(residuals))
+    })
+    ))
+  })
+)
+```
+
+### Plot train model (best bma model)
+```{r}
+melt(bind_rows(flatten_nested_list(best_model_clusters_df_list),.id="Model config"),id.vars = c("Model config","y"),variable.name="Cluster",value.name="y_hat")#%>%
+#   mutate(Cluster_name = sprintf("Cluster %d",Cluster))%>%
+#   ggplot(aes(x=y_hat,y=y))+
+#   geom_point(size=1,alpha=0.5,shape=1)+
+#   geom_abline(intercept=0,colour="red",linetype=2)+
+# facet_grid(`Model config`~Cluster_name)+
+#   theme_classic()+
+#   labs(y="Observed TSS (mg/l)",x="Predicted TSS (mg/l)")
+
+  
+```
+
+## Predicted values from each cluster (clusters_df_list) (weighted averaged model)
+
+### create_next_level_BMA
+```{r}
+create_next_level_BMA = function(bma_model_list,cluster_list){
+  #data can be train or test data
+  #outputs a df with columns as the cluster model's predicted values via the BMA weighted averaged model (instead of just the best model)
+  
+  cluster_predicted_values<-lapply(bma_model_list,function(model_prior){
+    lapply(model_prior,function(model_list){ #model_lists contains a list of model clusters
+      
+      compute_expected_values = function(bma_model,data){
+        predicted_values <- pred.density(bma_model,data) #takes the weighted averaged models to predict
+        #The predictive density is a mixture density based on the nmodels best models in a bma object (cf. nmodel in bms).
+# The number of 'best models' to retain is therefore vital and should be set quite high for accuracy.
+        y_hat<-predicted_values$fit
+        y_hat
+      }
+      #this creates a df where each column is the predicted values of each cluster model
+      #this is because we want to combine the cluster models to form a final BMA model
+      cluster_models <- as.data.frame(do.call(cbind,mapply(compute_expected_values,model_list,cluster_list,SIMPLIFY = F))) #each model is associated to the cluster train data
+      y<-cluster_list[[1]]$Concentration #doesnt matter which cluster cus all the concentration value is the same
+      cbind(y,cluster_models)
+    })
+  })
+  
+  cluster_predicted_values
+  
+}
+
+clusters_df_list <- create_next_level_BMA(TSS_bms_models,clustered_candidate_BBR_df)
+clusters_df_list
+```
+
+
+### Individual cluster models train RMSE (weighted average cluster models)
+```{r}
+#this outputs the RMSE of individual cluster models
+do.call(rbind,lapply(flatten_nested_list(clusters_df_list),function(model_config){
+    y <- model_config[,1]
+    as.data.frame(do.call(cbind,
+    lapply(model_config[,c(2:7)],function(predicted_y){
+      residuals <- predicted_y - y
+      RMSE<- sqrt(sum(residuals^2)/length(residuals))
+    })
+    ))
+  })
+)
+```
+
+
+### Plot train model (weighted averaged cluster models)
+
+```{r}
+clusters_df_list
+```
+
+
+```{r}
+melt(bind_rows(flatten_nested_list(clusters_df_list),.id="Model config"),id.vars = c("Model config","y"),variable.name="Cluster",value.name="y_hat")%>%
+  mutate(Cluster_name = sprintf("Cluster %d",Cluster))%>%
+  ggplot(aes(x=y_hat,y=y))+
+  geom_point(size=1,alpha=0.5,shape=1)+
+  geom_abline(intercept=0,colour="red",linetype=2)+
+facet_grid(`Model config`~Cluster_name)+
+  theme_classic()+
+  labs(y="Observed TSS (mg/l)",x="Predicted TSS (mg/l)")
+
+  
+```
+
+
+
+# Hierarch models
+
+## best_zlm_clustered_model_list (best bma model)
+
+```{r}
+best_zlm_clustered_model_list<-lapply(best_model_clusters_df_list,function(model_prior){
+  lapply(model_prior,function(model){
+    hierarch_model<-lapply(g_list,function(g_prior){
+      zlm_model<-zlm(y~.,data=model,g=g_prior) #fit zlm model to the 6 expected y output of 6 cluster models
+      summary_zlm<-summary(zlm_model)
+      # coef_df<-as.data.frame(summary_zlm$coefficients)
+      residuals <- summary_zlm$residuals
+      RMSE <- sqrt(sum(residuals^2)/length(residuals))
+      coeff<-summary_zlm$coefficients
+      coef_df <- data.frame(Coefficients=coeff)
+      coef_df$coef.sd<-summary_zlm$coef.sd
+      coef_df$RMSE<-RMSE
+      coef_df$Log_Marginal_Likelihood <- summary_zlm$log.lik
+      coef_df$E.shrinkage <- summary_zlm$E.shrinkage
+      coef_df$hierarch_gprior <- summary_zlm$gprior
+      
+      coef_df<-coef_df%>%
+      tibble::rownames_to_column("Beta")
+      
+      list(zlm_model=zlm_model,coef_df=coef_df)
+    })
+    names(hierarch_model) <- g_list
+    hierarch_model
+  })
+}
+)
+best_zlm_clustered_model_list
+```
+
+```{r}
+best_zlm_clustered_model_list$uniform$UIP$UIP$zlm_model
+attr(best_zlm_clustered_model_list$uniform$UIP$UIP$zlm_model$terms,"term.labels")
+# clusters_df_list$uniform$UIP[,c("`0`","`1`")]
+# clusters_df_list$uniform$UIP[,c("`0`", "`1`", "`2`", "`3`", "`4`", "`5`")]
+as.numeric(gsub("`","",c("`0`", "`1`", "`2`", "`3`", "`4`", "`5`")))
+test_df<-clusters_df_list$uniform$UIP
+test_df[,as.numeric(gsub("`","",c("`0`", "`1`", "`2`", "`3`", "`4`", "`5`")))]
+```
+
+
+## best_lm_clustered_model_list (best bma model)
+
+```{r}
+best_lm_clustered_model_list <- lapply(best_model_clusters_df_list,function(model_prior){
+  lapply(model_prior,function(model){
+      lm_model<-lm(y~.,data=model)
+      summary_lm<-summary(lm_model)
+      coef_df<-as.data.frame(summary_lm$coefficients)
+      coef_df$adj.r.squared<-summary_lm$adj.r.squared
+      residuals <- summary_lm$residuals
+      coef_df$RMSE <- sqrt(sum(residuals^2)/length(residuals))
+      
+      coef_df<-coef_df%>%
+      tibble::rownames_to_column("Beta")
+      list(lm_model=lm_model,coef_df=coef_df)
+
+    # names(hierarch_model) <- g_list
+    # hierarch_model
+  })
+})
+
+best_lm_clustered_model_list
+```
+
+## zlm_clustered_model_list (weighted averaged bma models)
+
+```{r}
+#Used to fit the Bayesian normal-conjugate linear model with Zellner's g prior and mean zero coefficient priors. Provides an object similar to the lm class.
+#this outputs the hierarch model (aggregation of the individual cluster models) & coef_df of the hierarch model
+#this uses zlm model which basically estimates the full model using all the variables
+zlm_clustered_model_list <- 
+#   bind_rows(
+# flatten_nested_list(
+lapply(clusters_df_list,function(model_prior){
+  lapply(model_prior,function(model){
+    hierarch_model<-lapply(g_list,function(g_prior){
+      zlm_model<-zlm(y~.,data=model,g=g_prior)
+      summary_zlm<-summary(zlm_model)
+      # coef_df<-as.data.frame(summary_zlm$coefficients)
+      residuals <- summary_zlm$residuals
+      RMSE <- sqrt(sum(residuals^2)/length(residuals))
+      coeff<-summary_zlm$coefficients
+      coef_df <- data.frame(Coefficients=coeff)
+      coef_df$coef.sd<-summary_zlm$coef.sd
+      coef_df$RMSE<-RMSE
+      coef_df$Log_Marginal_Likelihood <- summary_zlm$log.lik
+      coef_df$E.shrinkage <- summary_zlm$E.shrinkage
+      coef_df$hierarch_gprior <- summary_zlm$gprior
+      
+      coef_df<-coef_df%>%
+      tibble::rownames_to_column("Beta")
+      
+      list(zlm_model=zlm_model,coef_df=coef_df)
+    })
+    names(hierarch_model) <- g_list
+    hierarch_model
+  })
+}
+)
+# ),.id="cluster_priors")
+zlm_clustered_model_list
+```
+
+## lm_clustered_model_list (weighted averaged bma models)
+
+```{r}
+lm_clustered_model_list <-
+lapply(clusters_df_list,function(model_prior){
+  lapply(model_prior,function(model){
+      lm_model<-lm(y~.,data=model)
+      summary_lm<-summary(lm_model)
+      coef_df<-as.data.frame(summary_lm$coefficients)
+      coef_df$adj.r.squared<-summary_lm$adj.r.squared
+      residuals <- summary_lm$residuals
+      coef_df$RMSE <- sqrt(sum(residuals^2)/length(residuals))
+      
+      coef_df<-coef_df%>%
+      tibble::rownames_to_column("Beta")
+      list(lm_model=lm_model,coef_df=coef_df)
+
+    # names(hierarch_model) <- g_list
+    # hierarch_model
+  })
+})
+lm_clustered_model_list
+```
+
+# Select model config using validation data
+
+## Best BMA model
+
+### Validation of individual cluster models (best bma model)
+```{r}
+best_clusters_df_list_valid<-create_next_level_BMA_best_model(best_bma_models,lapply(clustered_candidate_BBR_valid,function(x){x[,2:ncol(x)]}))
+best_clusters_df_list_valid
+```
+### Individual cluster models validation RMSE
+```{r}
+#this outputs the RMSE of individual cluster models
+do.call(rbind,lapply(flatten_nested_list(best_clusters_df_list_valid),function(model_config){
+    y <- model_config[,1]
+    as.data.frame(do.call(cbind,
+    lapply(model_config[,c(2:7)],function(predicted_y){
+      residuals <- predicted_y - y
+      RMSE<- sqrt(sum(residuals^2)/length(residuals))
+    })
+    ))
+  })
+)#%>%
+  #rowSums()
+```
+
+### Plot valid model (best bma cluster models)
+```{r}
+melt(bind_rows(flatten_nested_list(best_clusters_df_list_valid),.id="Model config"),id.vars = c("Model config","y"),variable.name="Cluster",value.name="y_hat")%>%
+  mutate(Cluster_name = sprintf("Cluster %d",Cluster))%>%
+  ggplot(aes(x=y_hat,y=y))+
+  geom_point(size=1,alpha=0.5,shape=1)+
+  geom_abline(intercept=0,colour="red",linetype=2)+
+facet_grid(`Model config`~Cluster_name)+
+  theme_classic()+
+  labs(y="Observed TSS (mg/l)",x="Predicted TSS (mg/l)")
+
+  
+```
+
+
+## Weighted averaged bma model
+
+### Validation of individual cluster models (weighted averaged bma model)
+
+```{r}
+#input is validation data into individual cluster models
+clusters_df_list_valid<- create_next_level_BMA(TSS_bms_models,lapply(clustered_candidate_BBR_valid,function(x){x[,2:ncol(x)]}))
+clusters_df_list_valid
+#1. then input this into the list of hierarch model
+#2. then pick the hierarch model with the best performance
+#then repeat 1 & 2 with the test set & check performance
+```
+
+### Individual cluster models validation RMSE
+```{r}
+#this outputs the RMSE of individual cluster models
+do.call(rbind,lapply(flatten_nested_list(clusters_df_list_valid),function(model_config){
+    y <- model_config[,1]
+    as.data.frame(do.call(cbind,
+    lapply(model_config[,c(2:7)],function(predicted_y){
+      residuals <- predicted_y - y
+      RMSE<- sqrt(sum(residuals^2)/length(residuals))
+    })
+    ))
+  })
+)#%>%
+  #rowSums()
+```
+
+*Discussion:*:
+- Uniform EBL has the lowest RMSE when summed across the cluster models
+- Cluster 0 has the lowest RMSE by a big margin
+
+
+
+```{r}
+predict(zlm_clustered_model_list$uniform$UIP$UIP$zlm_model,newdata= clusters_df_list_valid$uniform$BRIC[,2:7])
+# zlm_clustered_model_list$uniform$UIP$BRIC$zlm_model
+# clusters_df_list_valid$uniform$UIP
+# clusters_df_list_valid$uniform$BRIC
+```
+
+
+```{r}
+bma_model_selection = function(bma_model_list,cluster_list){
+  
+  zlm_model_list<-lapply(bma_model_list,function(model_prior){
+    lapply(model_prior,function(g_prior){
+      lapply(g_prior,function(hierarch_prior){
+        hierarch_prior$zlm_model
+      })
+    })
+  })
+  
+  zlm_model_flatten_list<- flatten_nested_list(zlm_model_list)
+  
+  cluster_flatten_list<- flatten_nested_list(cluster_list)
+  cluster_flatten_list<-rep(cluster_flatten_list,each=3)
+  
+  # length(zlm_model_flatten_list) == length(cluster_flatten_list)
+  predict_model = function(model,newdata){
+    y_hat<-predict(model,newdata=newdata[,2:7])
+    y<- newdata$y
+    residuals <- y_hat - y
+    RMSE <- sqrt(sum(residuals^2)/length(residuals))
+    RMSE
+  }
+  
+  mapply(predict_model,zlm_model_flatten_list,cluster_flatten_list)
+
+}
+
+bma_model_selection(zlm_clustered_model_list,clusters_df_list_valid)
+```
+
+
+```{r}
+bma_model_selection = function(bma_model_list,cluster_list){
+  
+  # bma_model_flat_list <- flatten_nested_list(bma_model_list)
+  # cluster_list <- lapply(cluster_list,function(x){ x[,2:ncol(x)]}) #remove the first column cus it contains sensor_type (chr column)
+  # 
+  # mapply(bma_model_performance,bma_model_flat_list,cluster_list,SIMPLIFY = F)
+  
+  # bma_model_flat_list
+  lapply(bma_model_list,function(model_prior){
+    lapply(model_prior,function(g_prior){
+      lapply(g_prior,function(hierarch_prior){
+        hierarch_prior$zlm_model
+      })
+    })
+  })
+}
+
+bma_model_selection(zlm_clustered_model_list,clustered_candidate_BBR_valid)
+```
+
+
+
+# PCA band selection
+
+do band selection only from train data
+This linear transformation fits this dataset to a new coordinate system in such a way that the most significant variance is found on the first coordinate, and each subsequent coordinate is orthogonal to the last and has a lesser variance.
+Where many variables correlate with one another, they will all contribute strongly to the same principal component. Each principal component sums up a certain percentage of the total variation in the dataset. Where your initial variables are strongly correlated with one another, you will be able to approximate most of the complexity in your dataset with just a few principal components. As you add more principal components, you summarize more and more of the original dataset. Adding additional components makes your estimate of the total dataset more accurate, but also more unwieldy.
+eigenvectors, and eigenvalues come in pairs: every eigenvector has a corresponding eigenvalue. Simply put, an eigenvector is a direction, such as "vertical" or "45 degrees", while an eigenvalue is a number telling you how much variance there is in the data in that direction. The eigenvector with the highest eigenvalue is, therefore, the first principal component.The number of eigenvalues and eigenvectors that exits is equal to the number of dimensions the data set has
+Note that reframing a dataset regarding a set of eigenvalues and eigenvectors does not entail changing the data itself, you’re just looking at it from a different angle, which should represent the data better.
+
+```{r}
+PCA_selected_covariates = function(list_df){
+  df<-bind_rows(lapply(list_df,function(x){
+    x$train
+  }),.id="Sensor angle")
+  
+  # lapply(list_df,function(x){
+  #   x$train
+  # })
+  df<-df[,c(9:ncol(df)-1)]
+  df
+  df.pca <- prcomp(df,center=T,scale. = T)
+  # ggbiplot(df.pca)
+  # df.pca <- PCA(df, scale.unit=TRUE, ncp=9, graph=T)
+  #scale.unit: to choose whether to scale the data or not 
+#ncp: number of dimensions kept in the result
+#graph: to choose whether to plot the graphs or not
+ #9 dim
+  # Results for Variables
+  
+  #var$contrib: contains the contributions (in percentage) of the variables to the principal components. The contribution of a variable (var) to a given principal component is (in percentage) : (var.cos2 * 100) / (total cos2 of the component).
+  
+  # res.var <- get_pca_var(df.pca)
+  # res.var$contrib[,1:2]        # Contributions to the PCs
+  
+  # Helper function 
+  #::::::::::::::::::::::::::::::::::::::::
+  var_coord_func <- function(loadings, comp.sdev){
+    loadings*comp.sdev
+  }
+  # Compute Coordinates
+  #::::::::::::::::::::::::::::::::::::::::
+  loadings <- df.pca$rotation
+  sdev <- df.pca$sdev
+  var.coord <- t(apply(loadings, 1, var_coord_func, sdev)) 
+  head(var.coord[, 1:4])
+  # Compute Cos2
+  #::::::::::::::::::::::::::::::::::::::::
+  var.cos2 <- var.coord^2
+  head(var.cos2[, 1:4])
+  # Compute contributions
+  #::::::::::::::::::::::::::::::::::::::::
+  comp.cos2 <- apply(var.cos2, 2, sum)
+  contrib <- function(var.cos2, comp.cos2){var.cos2*100/comp.cos2}
+  var.contrib <- t(apply(var.cos2,1, contrib, comp.cos2))
+  pcs_contrib <- as.data.frame(var.contrib[, 1:2])%>% #sum of rows per column is 100
+    tibble::rownames_to_column("Band ratio")
+  # sort(pcs_contrib[,1],decreasing=T)
+  # pcs_contrib[order(pcs_contrib$PC1, decreasing=TRUE),, drop=FALSE]
+  pcs_contrib%>%
+    arrange(desc(PC1))
+}
+
+PCA_selected_covariates(TSS_sensor_angle_train_test)
+```
+
+## Hierarchical BMA (HBMA)
+
+```{r}
+HBMA_predict = function(base_model_list,cluster_data,include.hierarch = T,get.best.bma = T,convert.to.lm = F,show.model.performance = T){
+  #base_model_list is TSS_bms_models, which is a nested list of model configs and cluster models.
+  #base_model_list is already a trained model, trained on train data set i.e. clustered_candidate_BBR_df
+  #base_model_list > model_prior > g_prior > cluster_models
+  #cluster_data can be train, valid or test data, ensure that the variable had the string valid/test
+  #if get.best.bma  == T, then it would only retrieve the model with the highest PMP, otherwise it would use the BMA weighted averaged model for each cluster
+  # if convert.to.lm == T, then the bma model will be converted to a standard OLS model
+  # if include.hierarch == T, it will by default show the performance of the final hierarch model
+  # if include.hierarch == T & convert.to.lm == T, it will show the OLS performance of the final hierarch model
+  # else include.hierarch == F, it will by default only show the performance of the individual cluster models
+  # if include.hierarch == F & convert.to.lm == T, it will show the OLS performance of the individual cluster models
+  
+  data_name <- deparse(substitute(cluster_data))
+  # if cluster_data is valid or test set, remove the first column that contains Sensor type
+  # if (grepl("valid", data_name,fixed=T) == T | grepl("test", data_name,fixed=T) == T){
+  #   cluster_data <- lapply(cluster_data,function(x) x[,2:ncol(x)])
+  # }
+  
+  # cluster_test <- lapply(cluster_test,function(x) x[,2:ncol(x)])
+  
+  #---------list of functions to compute y_hat--------------
+  compute_expected_values_best_model = function(bma_model,test_data){
+    bma_model <- as.zlm(cluster_model,model=1) #convert to zlm model object to get the best model (highest PMP)
+    filtered_names <- attr(bma_model$terms,"term.labels")
+    filtered_names <- names(test_data)[(names(test_data) %in% filtered_names)]
+    filtered_data <- test_data[,filtered_names,drop=FALSE] #requires drop false when subsetting only one column
+    y_hat<-predict(bma_model,newdata = filtered_data)
+    y_hat
+  }
+  
+  compute_expected_values = function(bma_model,test_data){
+    #The predictive density is a mixture density based on the nmodels best models in a bma object (cf. nmodel in bms).
+    # The number of 'best models' to retain is therefore vital and should be set quite high for accuracy.
+    predicted_values <- pred.density(bma_model,newdata = test_data) #takes the weighted averaged models to predict
+    y_hat<-predicted_values$fit
+    y_hat
+  }
+  
+  
+  #---------list of functions to assess model performance--------------
+  rmse = function(residuals){sqrt(sum(residuals^2)/length(residuals))} 
+  
+  bma_model_performance = function(bma_model,test_data){ #weighted averaged model
+    model_name <- deparse(substitute(bma_model))
+    
+    y <- test_data[,1]#$Concentration
+    if (get.best.bma == T){
+      
+      if (class(bma_model) == "bma"){
+        bma_model <- as.zlm(bma_model,model=1)
+      }
+      
+      if (grepl("hierarch", model_name,fixed=T) == F ){
+        filtered_names <- attr(bma_model$terms,"term.labels")
+        filtered_names <- names(test_data)[(names(test_data) %in% filtered_names)]
+        test_data <- test_data[,filtered_names,drop=FALSE] #filter data
+      }
+      
+    }
+    
+    #vector
+    predicted_values <- pred.density(bma_model,test_data)
+    y_hat <- predicted_values$fit
+    predictive_density <- predicted_values$dyf(y_hat) #predictive density of predicted values
+    std_error <- predicted_values$std.err
+    interq<-quantile(predicted_values,c(0.05,0.95))
+    residuals<- y - y_hat
+    #scalar
+    RMSE <- rmse(residuals)
+    log_predictive_score <- lps.bma(predicted_values,y_hat)
+    #outputs a df, it will broadcast rmse & lps
+    data.frame(y,y_hat, predictive_density,y_5 = interq[,1],y_95=interq[,2],std_error,RMSE,log_predictive_score)
+  }
+  
+  
+  best_model_ols_performance = function(bma_model,test_data){
+    if (class(bma_model) == "bma"){
+      best_lm <- lm(model.frame(as.zlm(bma_model))) #convert best bma model into a standard OLS model
+    }
+    
+    else {
+      best_lm <- lm(model.frame(bma_model)) #convert zlm model into a standard OLS model
+    }
+    
+    summary_best_lm <- summary(best_lm)
+    ols_model_coeffs<-as.data.frame(summary_best_lm$coefficients)
+    adj_r2 <- summary_best_lm$adj.r.squared
+    RMSE <- rmse(summary_best_lm$residuals)
+    ols_model_coeffs$adj_r2 <- adj_r2
+    ols_model_coeffs$RMSE <- RMSE
+    ols_model_coeffs
+  }
+  
+  compute_RMSE_cluster_models = function(hierarch_model_input){
+    #first column is y, remaining columns are y_hat of individual cluster models
+    #output RMSE of individual cluster models
+    y <- hierarch_model_input[,1]
+    rmse_list <- lapply(hierarch_model_input[,2:ncol(hierarch_model_input)],function(yhat){
+      residuals <- y - yhat
+      rmse(residuals)
+    })
+    as.data.frame(do.call(cbind,rmse_list))
+  }
+  
+  compute_hierarch_model = function(hierarch_model_input){
+    #hierarch_model_input has first column as y, and remaining columns as y_hat from individual cluster models
+    #fit zlm model to the 6 expected y output of 6 cluster models
+    g_list <- c("UIP","BRIC","EBL")
+    hierarch_model_list <- lapply(g_list,function(g_prior){
+      zlm_model<-zlm(y~.,data=hierarch_model_input,g=g_prior)
+      
+      if (convert.to.lm == T){
+        model_perf <- best_model_ols_performance(zlm_model,hierarch_model_input)
+      }
+      
+      else {
+        model_perf <- bma_model_performance(zlm_model,hierarch_model_input)
+      }
+      
+      model_perf
+    })
+    names(hierarch_model_list) <- g_list
+    hierarch_model_list
+  }
+  
+  #---------list of functions to plot--------------
+  plot_scatter = function(cluster_yhat){
+    melt(bind_rows(flatten_nested_list(cluster_yhat),.id="Model config")
+           ,id.vars = c("Model config","y"),
+           variable.name="Cluster",
+           value.name="y_hat")%>%
+    mutate(Cluster_name = sprintf("Cluster %d",Cluster))%>%
+    ggplot(aes(x=y_hat,y=y))+
+    geom_point(size=1,alpha=0.5,shape=1)+
+    geom_abline(intercept=0,colour="red",linetype=2)+
+    facet_grid(`Model config`~Cluster_name)+
+    theme_classic()+
+    labs(y="Observed TSS (mg/l)",x="Predicted TSS (mg/l)")
+  }
+  
+  
+  #---------END FUNCTIONS--------------
+  
+  #---------CLUSTER MODELS----------
+  if (include.hierarch == F){ 
+    output <- lapply(base_model_list,function(model_prior){ 
+      lapply(model_prior,function(g_prior){ #contains a list of cluster models
+        if (convert.to.lm == T){
+          model_perf <- mapply(best_model_ols_performance,g_prior,cluster_data,SIMPLIFY = F) #converts model to OLS
+        }
+        else {
+          model_perf <- mapply(bma_model_performance,g_prior,cluster_data,SIMPLIFY = F) #use BMA model
+        }
+        names(model_perf) <- names(g_prior)
+        model_perf
+      })
+    })
+    
+  }
+  
+  #---------HIERARCH MODELS----------
+  else { #then compute expected y_hat from each cluster models
+    output<-lapply(base_model_list,function(model_prior){ 
+      lapply(model_prior,function(g_prior){ #contains a list of cluster models
+        if (get.best.bma == T){
+          y_hat_list <- mapply(compute_expected_values_best_model,g_prior,cluster_data,SIMPLIFY = F) #converts model to OLS
+        }
+        else {
+          y_hat_list <- mapply(compute_expected_values,g_prior,cluster_data,SIMPLIFY = F) #use BMA model
+        }
+        
+        y <- cluster_data[[1]]$Concentration
+        y_hat_df<-as.data.frame(do.call(cbind,y_hat_list))
+        hierarch_model_input <- cbind(y,y_hat_df)
+        
+        if (show.model.performance == T){ #if show.model.performance & include.hierarch == T
+          rmse_df <- compute_RMSE_cluster_models(hierarch_model_input)
+          print(rmse_df)
+        }
+        
+        model_performance <- compute_hierarch_model(hierarch_model_input)
+        model_performance
+      })
+    })
+  }
+  
+  output
+  
+}
+
+HBMA_predict(TSS_bms_models,clustered_candidate_BBR_df,include.hierarch = T,get.best.bma = F,convert.to.lm = F,show.model.performance = T)
+```
